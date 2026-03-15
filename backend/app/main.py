@@ -5,9 +5,10 @@ from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import FileResponse
 
@@ -37,6 +38,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add standard security headers to every response."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(self), camera=(), microphone=()"
+        response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+        return response
+
 
 # Get version from package metadata (set in pyproject.toml)
 try:
@@ -89,11 +104,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Security headers (outermost – runs for every response)
+app.add_middleware(SecurityHeadersMiddleware)
+
 # Add session middleware (required for OIDC)
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.session_secret,
     max_age=86400,  # 24 hours
+    same_site="lax",
+    https_only=not settings.debug,
 )
 
 # Add CORS middleware
@@ -101,8 +121,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Include routers
@@ -133,8 +153,9 @@ if STATIC_DIR.exists():
     async def serve_spa(full_path: str):
         """Serve the SPA frontend - returns index.html for all non-API routes."""
         # Try to serve the exact file first (for files like favicon.ico)
-        file_path = STATIC_DIR / full_path
-        if file_path.is_file():
+        file_path = (STATIC_DIR / full_path).resolve()
+        # Prevent path traversal – resolved path must stay inside STATIC_DIR
+        if file_path.is_file() and str(file_path).startswith(str(STATIC_DIR.resolve())):
             return FileResponse(file_path)
         # Otherwise return index.html for SPA routing
         return FileResponse(STATIC_DIR / "index.html")
