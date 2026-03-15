@@ -355,4 +355,7 @@ async def import_config(
     except Exception as e:
         await db.rollback()
         logger.error(f"Config import failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Import failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Import failed due to an internal error. Check server logs for details.",
+        )

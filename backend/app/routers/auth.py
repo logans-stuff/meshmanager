@@ -1,6 +1,7 @@
 """Authentication endpoints."""
 
 import time
+from collections import defaultdict
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -35,6 +36,32 @@ from app.schemas.auth import (
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
+
+# In-memory login rate limiter keyed by client IP.
+# Stores list of failed-attempt timestamps per IP.
+_login_attempts: dict[str, list[float]] = defaultdict(list)
+_LOGIN_MAX_ATTEMPTS = 10
+_LOGIN_WINDOW_SECONDS = 300  # 5 minutes
+
+
+def _check_login_rate_limit(request: Request) -> None:
+    """Raise 429 if the client IP has exceeded the login attempt threshold."""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    attempts = _login_attempts[client_ip]
+    # Prune old entries
+    _login_attempts[client_ip] = [t for t in attempts if now - t < _LOGIN_WINDOW_SECONDS]
+    if len(_login_attempts[client_ip]) >= _LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please wait before trying again.",
+        )
+
+
+def _record_failed_login(request: Request) -> None:
+    """Record a failed login attempt for rate limiting."""
+    client_ip = request.client.host if request.client else "unknown"
+    _login_attempts[client_ip].append(time.monotonic())
 
 
 async def _get_user_count(db: AsyncSession) -> int:
@@ -79,6 +106,8 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Log in with username and password."""
+    _check_login_rate_limit(request)
+
     if settings.disable_local_auth:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -95,12 +124,14 @@ async def login(
     user = result.scalar()
 
     if not user or not user.password_hash:
+        _record_failed_login(request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
 
     if not verify_password(credentials.password, user.password_hash):
+        _record_failed_login(request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
