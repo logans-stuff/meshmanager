@@ -172,6 +172,7 @@ async def delete_source(
     await collector_manager.remove_source(source_id)
 
     await db.delete(source)
+    await db.flush()
 
 
 @router.post("/{source_id}/test", response_model=SourceTestResult)
