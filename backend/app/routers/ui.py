@@ -445,7 +445,7 @@ async def get_position_history(
 @router.get("/traceroutes")
 async def list_traceroutes(
     db: AsyncSession = Depends(get_db),
-    hours: int = Query(default=24, ge=1, le=168, description="Hours of history"),
+    hours: int = Query(default=24, ge=1, le=720, description="Hours of history"),
     _access: None = Depends(require_tab_access("map")),
 ) -> list[dict]:
     """Get recent traceroutes for rendering on the map."""
