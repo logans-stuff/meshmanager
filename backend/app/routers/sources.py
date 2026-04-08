@@ -1,5 +1,8 @@
 """Source management endpoints (admin only)."""
 
+import asyncio
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +21,26 @@ from app.schemas.source import (
 )
 from app.services.collector_manager import collector_manager
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/admin/sources", tags=["sources"])
+
+
+async def _restart_collector_background(source: Source) -> None:
+    """Restart a collector in the background, logging any errors.
+
+    Collector restart involves stopping the running collector (which may
+    await an in-progress poll iteration) and making a blocking HTTP call
+    to the remote node via ``_resolve_local_node``. These operations can
+    take well over 60 seconds, which exceeds typical proxy timeouts and
+    causes 524 errors if awaited inline on the HTTP request.
+    """
+    try:
+        await collector_manager.update_source(source)
+    except Exception:
+        logger.exception(
+            "Background collector restart failed for source %s", source.id
+        )
 
 
 @router.get("", response_model=list[SourceResponse])
@@ -122,8 +144,11 @@ async def update_meshmonitor_source(
     await db.flush()
     await db.refresh(source)
 
-    # Update collector with new config
-    await collector_manager.update_source(source)
+    # Restart the collector in the background so the HTTP response can
+    # return immediately. Awaiting this inline can exceed proxy timeouts
+    # (e.g. Cloudflare 524) because collector.stop() waits for in-progress
+    # polls and collector.start() makes a blocking HTTP call to the node.
+    asyncio.create_task(_restart_collector_background(source))
 
     return SourceResponse.model_validate(source)
 
@@ -150,8 +175,9 @@ async def update_mqtt_source(
     await db.flush()
     await db.refresh(source)
 
-    # Update collector with new config
-    await collector_manager.update_source(source)
+    # Restart the collector in the background (see update_meshmonitor_source
+    # for the full explanation of why this can't be awaited inline).
+    asyncio.create_task(_restart_collector_background(source))
 
     return SourceResponse.model_validate(source)
 
